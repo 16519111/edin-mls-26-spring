@@ -71,8 +71,16 @@ install_deps() {
         pip install cupy
     fi
 
-    # Install numpy if not present
+    # Install numpy
     pip install numpy
+
+    # Install PyTorch (for ASR homework)
+    echo -e "${YELLOW}[hack.sh] Installing PyTorch...${NC}"
+    pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+    # Install transformers and related packages (for ASR homework)
+    echo -e "${YELLOW}[hack.sh] Installing transformers and related packages...${NC}"
+    pip install transformers safetensors soundfile librosa accelerate
 
     echo -e "${GREEN}[hack.sh] Dependencies installed successfully!${NC}"
     echo ""
