@@ -69,10 +69,10 @@ Follow this recommended progression:
 
 This course covers two GPU programming frameworks with identical lesson structures:
 
-| Framework | Directory | Backend | Best For |
+| Framework | Directory | Best For |
 |-----------|-----------|---------|----------|
-| **cuTile** | `cutile-tutorial/` | CuPy/CUDA | NVIDIA-specific optimization |
-| **Triton** | `triton-tutorial/` | PyTorch | Cross-platform, Python-native |
+| **cuTile** | `cutile-tutorial/` | NVIDIA-specific optimization |
+| **Triton** | `triton-tutorial/` | Cross-platform, Python-native |
 
 Start with **cuTile** for the main course content. Use **Triton** if you want to explore an alternative approach or need better cross-GPU portability.
 
