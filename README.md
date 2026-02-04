@@ -163,6 +163,9 @@ flowchart TD
 
 As we discussed in [Tool Comparison](https://github.com/ed-aisys/edin-mls-26-spring#tool-comparison), CUDA can be quite complex and daunting for beginners, while CuPy may experience significant performance issues. We aimed to strike a balance between ease of programming and performance. Therefore, we offer two frameworks for HW1: the CuTile version and the Triton version.
 
+> [!NOTE]
+> The Triton version of `hw1-asr` is not released yet and will be provided later.
+
 The `hw1-asr/` directory contains a hands-on assignment implementing GPU-accelerated speech recognition:
 
 ```
