@@ -17,6 +17,64 @@ st.set_page_config(
     layout="centered"
 )
 
+def get_cached_model(model_key, loader_fn):
+    """Cache a single model bundle per session to avoid repeated loads."""
+    current_key = st.session_state.get("current_model_key")
+    current_bundle = st.session_state.get("current_model_bundle")
+
+    if current_key == model_key and current_bundle is not None:
+        return current_bundle, True
+
+    if current_bundle is not None and current_key != model_key:
+        st.session_state.current_model_bundle = None
+        st.session_state.current_model_key = None
+        release_model_bundle(current_bundle)
+        clear_other_model_caches(except_key=model_key)
+
+    bundle = loader_fn()
+    st.session_state.current_model_key = model_key
+    st.session_state.current_model_bundle = bundle
+    return bundle, False
+
+
+def release_model_bundle(bundle):
+    """Best-effort release of GPU/CPU memory for a model bundle."""
+    try:
+        del bundle
+    except Exception:
+        pass
+
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+    try:
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def clear_other_model_caches(except_key=None):
+    """Clear Streamlit cached resources for other models."""
+    for key, (_, loader_fn) in MODEL_LOADERS.items():
+        if key == except_key:
+            continue
+        clear_fn = getattr(loader_fn, "clear", None)
+        if callable(clear_fn):
+            clear_fn()
+
 
 def load_cutile_model_generic(folder_name, backend_config=None):
     """Load CuTile model from specified folder."""
@@ -69,37 +127,25 @@ def load_cutile_model():
 
 
 @st.cache_resource
-def load_cutile_v1_model():
-    """Load CuTile V1 (Initial CuPy) model."""
+def load_cutile_example_model():
+    """Load CuTile Example (Initial CuPy) model."""
     config = {
         'BACKEND': 'cublas',
         'FUSED': False,
         'USE_FLASH_ATTENTION': False
     }
-    return load_cutile_model_generic("glm_asr_cutile_v1", config)
+    return load_cutile_model_generic("glm_asr_cutile_example", config)
 
 
-@st.cache_resource
-def load_cutile_v10_model():
-    """Load CuTile V10 (FP16 Optimized) model."""
-    config = {
-        'BACKEND': 'cublas_fp16',
-        'USE_CUBLAS_FP16': True,
-        'FUSED': True
-    }
-    return load_cutile_model_generic("glm_asr_cutile_v10", config)
-
-
-@st.cache_resource
-def load_scratch_model():
-    """Load PyTorch scratch model."""
+def load_torch_model(folder_name, dtype="auto"):
+    """Load a Torch-based model from the specified folder."""
     import importlib
 
     start = time.perf_counter()
 
-    scratch_path = str(BASE_DIR / "glm_asr_scratch")
-    if scratch_path not in sys.path:
-        sys.path.insert(0, scratch_path)
+    folder_path = str(BASE_DIR / folder_name)
+    if folder_path not in sys.path:
+        sys.path.insert(0, folder_path)
 
     # Clear cached modules
     mods_to_clear = [m for m in sys.modules.keys()
@@ -112,12 +158,28 @@ def load_scratch_model():
     model_dir = snapshot_download("zai-org/GLM-ASR-Nano-2512")
 
     torch_glm = importlib.import_module("torch_glm")
-    model, processor = torch_glm.load_model_and_processor(model_path=model_dir, dtype="auto")
+    model, processor = torch_glm.load_model_and_processor(model_path=model_dir, dtype=dtype)
     tokenizer = None
 
     load_time_ms = (time.perf_counter() - start) * 1000
 
     return model, processor, tokenizer, load_time_ms
+
+
+@st.cache_resource
+def load_scratch_model():
+    """Load PyTorch scratch model."""
+    return load_torch_model("glm_asr_scratch")
+
+
+MODEL_CHOICES = [
+    ("CuTile Example (Baseline)", "cutile_example", load_cutile_example_model),
+    ("CuTile Template", "cutile_template", load_cutile_model),
+    ("Scratch (PyTorch)", "scratch", load_scratch_model),
+]
+MODEL_LABELS = [label for label, _, _ in MODEL_CHOICES]
+MODEL_BY_LABEL = {label: (key, loader) for label, key, loader in MODEL_CHOICES}
+MODEL_LOADERS = {key: (label, loader) for label, key, loader in MODEL_CHOICES}
 
 
 def transcribe_cutile(audio_array, model, processor, tokenizer):
@@ -171,14 +233,14 @@ def transcribe_cutile(audio_array, model, processor, tokenizer):
     return transcription, elapsed_ms
 
 
-def transcribe_scratch(audio_array, model, processor, tokenizer):
-    """Run PyTorch scratch inference."""
+def transcribe_scratch(audio_array, model, processor, tokenizer, folder_name="glm_asr_scratch"):
+    """Run Torch-based inference (scratch)."""
     import torch
     import importlib
 
-    scratch_path = str(BASE_DIR / "glm_asr_scratch")
-    if scratch_path not in sys.path:
-        sys.path.insert(0, scratch_path)
+    folder_path = str(BASE_DIR / folder_name)
+    if folder_path not in sys.path:
+        sys.path.insert(0, folder_path)
 
     torch_glm = importlib.import_module("torch_glm")
 
@@ -282,24 +344,19 @@ st.title("🎤 GLM-ASR Student Demo")
 st.caption("Test your implementation")
 
 # Version selection
-version = st.radio("Select version:", ["CuTile V1 (Baseline)", "CuTile V10 (Optimized)", "CuTile Template", "Scratch (PyTorch)"], horizontal=True)
+version = st.radio("Select version:", MODEL_LABELS, horizontal=True)
 
 # Load model
 with st.spinner(f"Loading {version} model..."):
     try:
-        if version == "CuTile V1 (Baseline)":
-            model, processor, tokenizer, load_time_ms = load_cutile_v1_model()
-        elif version == "CuTile V10 (Optimized)":
-            model, processor, tokenizer, load_time_ms = load_cutile_v10_model()
-        elif version == "CuTile Template":
-            model, processor, tokenizer, load_time_ms = load_cutile_model()
+        model_key, loader_fn = MODEL_BY_LABEL[version]
+        (model, processor, tokenizer, load_time_ms), reused = get_cached_model(model_key, loader_fn)
+
+        st.session_state.model_load_time_ms = load_time_ms
+        if reused:
+            st.success("Model loaded | Reusing cached instance")
         else:
-            model, processor, tokenizer, load_time_ms = load_scratch_model()
-
-        if 'model_load_time_ms' not in st.session_state:
-            st.session_state.model_load_time_ms = load_time_ms
-
-        st.success(f"Model loaded | Initial load: {st.session_state.model_load_time_ms:.0f} ms")
+            st.success(f"Model loaded | Initial load: {load_time_ms:.0f} ms")
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         import traceback
@@ -367,7 +424,7 @@ if audio_array is not None:
     if st.button("▶️ Transcribe", type="primary", use_container_width=True):
         with st.spinner("Transcribing..."):
             try:
-                if version in ["CuTile Template", "CuTile V1 (Baseline)", "CuTile V10 (Optimized)"]:
+                if version in ["CuTile Template", "CuTile Example (Baseline)"]:
                     result, elapsed_ms = transcribe_cutile(audio_array, model, processor, tokenizer)
                 else:
                     result, elapsed_ms = transcribe_scratch(audio_array, model, processor, tokenizer)

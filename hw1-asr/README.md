@@ -11,9 +11,7 @@ GLM-ASR is a speech-to-text model that converts audio into text. Your task is to
 ```
 student_version/
 ├── glm_asr_cutile_template/   # YOUR WORK: Complete the TODOs here
-├── glm_asr_cutile_v1/         # Reference: V1 baseline (Initial CuPy, ~3200ms)
-├── glm_asr_cutile_v10/        # Reference: V10 optimized (FP16, ~2200ms)
-├── glm_asr_cutile_example/    # Reference: Working implementation
+├── glm_asr_cutile_example/    # Reference: Example baseline (Initial CuPy, ~3200ms)
 ├── glm_asr_scratch/           # Reference: PyTorch baseline
 ├── demo.py                    # Streamlit interactive demo
 ├── benchmark.sh               # Shell wrapper for benchmark_student.py
@@ -28,22 +26,27 @@ student_version/
 
 | Version | Description | Performance |
 |---------|-------------|-------------|
-| `glm_asr_cutile_v1` | Baseline: Pure CuPy, no FlashAttention | ~3200ms |
-| `glm_asr_cutile_v10` | Optimized: FP16, fused kernels, KV cache | ~2200ms |
+| `glm_asr_cutile_example` | Baseline: Pure CuPy, no FlashAttention | ~3200ms |
 | `glm_asr_scratch` | PyTorch reference implementation | - |
 
 ## Quick Start
+
+Environment setup (from repo root):
+```bash
+source utils/setup-cutile.sh   # CuTile track
+```
+
+Both setup scripts install common ML tooling used by the demo:
+`transformers`, `huggingface_hub`, `streamlit`, `soundfile`, `scipy`.
 
 ### 1. Test Reference Implementations
 
 First, verify the reference implementations work:
 
 ```bash
-# Test V1 baseline (~3200ms)
-./benchmark.sh glm_asr_cutile_v1
+# Test baseline (~3200ms)
+./benchmark.sh glm_asr_cutile_example
 
-# Test V10 optimized (~2200ms, needs warmup)
-python benchmark_student.py glm_asr_cutile_v10 --warmup 1 --runs 3
 ```
 
 Expected output:
@@ -115,11 +118,8 @@ Shell scripts provide user-friendly wrappers with folder validation and help mes
 # Basic correctness test
 ./benchmark.sh glm_asr_cutile_template
 
-# Test V1 baseline
-./benchmark.sh glm_asr_cutile_v1
-
-# Test V10 optimized
-./benchmark.sh glm_asr_cutile_v10
+# Test baseline
+./benchmark.sh glm_asr_cutile_example
 
 # Detailed performance analysis
 ./benchmark_detailed.sh glm_asr_cutile_template
@@ -139,12 +139,9 @@ Python scripts offer more options and can be used directly without shell.
 ```bash
 # Basic benchmark with options
 python benchmark_student.py glm_asr_cutile_template
-python benchmark_student.py glm_asr_cutile_v1 --warmup 1 --runs 3
-python benchmark_student.py glm_asr_cutile_v10 --audio /path/to/audio.wav
-
+python benchmark_student.py glm_asr_cutile_example --warmup 1 --runs 3
 # Detailed profiling
 python benchmark_detailed.py glm_asr_cutile_template
-python benchmark_detailed.py glm_asr_cutile_v10 --runs 5
 ```
 
 ### Streamlit Demo
@@ -155,7 +152,7 @@ Interactive web UI for testing transcription:
 streamlit run demo.py
 ```
 
-Select from: `CuTile V1 (Baseline)`, `CuTile V10 (Optimized)`, `CuTile Template`, `Scratch (PyTorch)`
+Select from: `CuTile Example (Baseline)`, `CuTile Template`, `Scratch (PyTorch)`
 
 ### Check the WebUI of your slurm job on your PC
 First, check the port from the output of `streamlit run demo.py`.
@@ -170,8 +167,7 @@ In the output of `show_tunnel.sh`, you will get the instruction of running a spe
 ## Tips
 
 1. **Study the references**:
-   - `glm_asr_cutile_v1/` - Simple baseline, easier to understand
-   - `glm_asr_cutile_v10/` - Optimized version, shows advanced techniques
+   - `glm_asr_cutile_example/` - Simple baseline, easier to understand
 
 2. **Test incrementally**: After implementing each layer, run the benchmark to check correctness.
 

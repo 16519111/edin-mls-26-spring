@@ -1,5 +1,5 @@
 """
-V1 - Initial CuPy Implementation
+Template Baseline - Initial CuPy Configuration
 Performance: 3652ms (15.7x slower than PyTorch)
 
 Key Characteristics:
@@ -22,7 +22,7 @@ from . import attention
 attention.USE_FLASH_ATTENTION = False
 
 from . import layers
-layers.Linear.BACKEND = 'cublas'  # Use basic backend for V1
+layers.Linear.BACKEND = 'cublas'  # Use basic backend for baseline
 layers.MLP.FUSED = False
 layers.AudioMLP.FUSED = False
 

@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 from flash_attention import flash_attention
 
 # Global flag to enable/disable FlashAttention
-# V1: FlashAttention disabled - uses CuPy fallback (einsum-based attention)
+# Baseline: FlashAttention disabled - uses CuPy fallback (einsum-based attention)
 USE_FLASH_ATTENTION = False
 
 

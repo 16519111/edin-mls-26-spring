@@ -129,7 +129,6 @@ def load_test_audio(audio_path=None):
 def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
     """Benchmark a CuTile implementation folder."""
     import cupy as cp
-    import importlib
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     folder_path = os.path.join(script_dir, folder_name)
@@ -152,14 +151,8 @@ def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
             del sys.modules[mod_name]
 
     # Apply version-specific configurations
-    if 'v10' in folder_name.lower():
-        print("Applying V10 configuration (FP16 optimized)...")
-        layers = importlib.import_module("layers")
-        layers.Linear.BACKEND = 'cublas_fp16'
-        layers.MLP.USE_CUBLAS_FP16 = True
-        layers.MLP.FUSED = True
-    elif '_v1' in folder_name.lower() or folder_name.lower().endswith('v1'):
-        print("Applying V1 configuration (baseline)...")
+    if 'example' in folder_name.lower():
+        print("Applying baseline configuration (example)...")
         layers = importlib.import_module("layers")
         layers.Linear.BACKEND = 'cublas'
         layers.MLP.FUSED = False
@@ -321,7 +314,6 @@ def benchmark_scratch_folder(folder_name, audio_array, num_warmup=1, num_runs=3)
 def prepare_inputs(audio_array, processor):
     """Prepare inputs for CuTile model."""
     import cupy as cp
-
     if hasattr(processor, 'apply_transcription_request'):
         inputs = processor.apply_transcription_request(audio_array)
         input_features = cp.asarray(inputs.input_features.numpy(), dtype=cp.float32)

@@ -1,4 +1,4 @@
-# V1 - Initial CuPy Implementation
+# Example - Initial CuPy Implementation
 
 ## Performance: 3652ms (PyTorch: 232ms) - 15.7x slower
 

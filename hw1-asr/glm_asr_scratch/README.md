@@ -75,7 +75,7 @@ Text Output (transcription)
 | `model.py` | Full GLM-ASR model combining all components |
 | `tokenizer.py` | BPE tokenizer that loads from tokenizer.json |
 | `weight_loader.py` | Safetensors weight loading |
-| `inference.py` | Main inference script |
+| `torch_glm.py` | Main inference script (PyTorch-only, no transformers) |
 
 ## Dependencies
 
@@ -91,7 +91,7 @@ No transformers, tokenizers, or other HuggingFace libraries required!
 
 ```bash
 cd glm_asr_scratch
-python inference.py
+python torch_glm.py
 ```
 
 ### With Pretrained Weights
@@ -107,21 +107,20 @@ python inference.py
 
 2. Run inference:
    ```bash
-   python inference.py /path/to/model
+   python torch_glm.py /path/to/model
    ```
 
 ### Python API
 
 ```python
-from inference import load_model_from_pretrained, load_processor_from_pretrained, transcribe
+from torch_glm import load_model_and_processor, transcribe
 
-# Load model
-model = load_model_from_pretrained("path/to/model")
-processor = load_processor_from_pretrained("path/to/model")
+# Load model + processor
+model, processor = load_model_and_processor(model_path="path/to/model")
 
 # Transcribe audio
 text = transcribe(model, processor, "audio.wav")
-print(text)
+print(text[0] if isinstance(text, list) else text)
 ```
 
 ## Key Concepts
