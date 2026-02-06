@@ -4,7 +4,7 @@ This assignment helps you understand GPU kernel optimization by implementing a s
 
 ## Overview
 
-GLM-ASR is a speech-to-text model that converts audio into text. This HW1 includes Triton and cuTile tracks (example + template) and focuses on performance optimization.
+GLM-ASR is a speech-to-text model that converts audio into text. This HW1 includes Triton and cuTile tracks (example + template) and focuses on performance optimization. **You only need to choose one from this to complete**, which we recommand Triton for its compatability in a lot of hardwares.
 
 ## Frameworks
 
@@ -129,7 +129,8 @@ Open the template for your track and complete the TODO sections in:
 - `glm_asr_cutile_template/rope.py`
 
 > [!NOTE]
-> You are not limited to filling the existing TODO kernels. You may refactor and fuse kernels (for example, implement logic that currently spans multiple kernels within a single Triton/cuTile kernel). You must implement kernels using Triton/cuTile only (do not use prebuilt operator libraries such as PyTorch).
+> You are not limited to filling the existing TODO kernels. You may refactor and fuse kernels (for example, implement logic that currently spans multiple kernels within a single Triton/cuTile kernel). 
+> However, you must implement kernels using Triton/cuTile only (do not use prebuilt operator libraries such as PyTorch).
 
 
 ### Key Files Explained
