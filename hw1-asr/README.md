@@ -14,8 +14,6 @@ What you will learn in this HW:
 - **Writing NVIDIA cuTile kernels** as an alternative track
 - **Performance optimization** techniques for GPU-based inference
 
-> **New here?** Read the **[Detailed Student Guide (GUIDE.md)](GUIDE.md)** for a step-by-step walkthrough, kernel patterns, and troubleshooting tips.
-
 ## Task
 
 ### What to Do
@@ -83,6 +81,8 @@ source utils/setup-cutile.sh
 ```
 
 ## Description
+
+> **New here?** Read the **[Detailed Student Guide (GUIDE.md)](GUIDE.md)** for a step-by-step walkthrough, kernel patterns, and troubleshooting tips.
 
 ### Directory Structure
 
