@@ -1,4 +1,4 @@
-# EDIN MLS 2026 Spring - Rendang Team
+# EDIN MLS 2026 Spring - Rendang Team !!
 
 Welcome to the Machine Learning Systems course at the University of Edinburgh (Spring 2026). This repository contains GPU programming tutorials and assignments designed to teach you how to write efficient GPU kernels for machine learning workloads.
 
