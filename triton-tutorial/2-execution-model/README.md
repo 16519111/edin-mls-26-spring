@@ -1,6 +1,6 @@
 # Triton Execution Model
 
-This tutorial explains how Triton organizes and executes code on the GPU.
+This tutorial explains to you how Triton organizes and executes code on the GPU.
 
 ## The Grid and The Program
 
