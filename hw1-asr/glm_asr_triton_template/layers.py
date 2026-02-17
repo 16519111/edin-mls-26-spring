@@ -126,7 +126,20 @@ def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 3: Store output
 
     # YOUR CODE HERE
-    pass
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_elements
+
+    # Step 1: Load input tile
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+
+    # Step 2: Compute tanh approximation
+    sqrt_2_over_pi = 0.7978845608028654
+    x3 = x * x * x
+    inner = sqrt_2_over_pi * (x + 0.044715 * x3)
+    y = x * 0.5 * (1.0 + tl.extra.cuda.libdevice.tanh(inner))
+
+    # Step 3: Store output
+    tl.store(y_ptr + offs, y, mask=mask)
 
 
 @triton.jit
@@ -147,7 +160,18 @@ def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 3: Multiply and store
 
     # YOUR CODE HERE
-    pass
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_elements
+
+    # Step 1: Load input tile
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+
+    # Step 2: Compute sigmoid
+    sigmoid = 1.0 / (1.0 + tl.exp(-x))
+    y = x * sigmoid
+
+    # Step 3: Multiply and store
+    tl.store(y_ptr + offs, y, mask=mask)
 
 
 @triton.jit
@@ -349,7 +373,22 @@ def softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE: tl.cons
     # Step 4: Store output
 
     # YOUR CODE HERE
-    pass
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_cols
+
+    # Step 1: Load row with masking
+    x = tl.load(x_ptr + row * stride_x + offs, mask=mask, other=-float("inf"))
+    
+    # Step 2: Subtract max for stability
+    x = x - tl.max(x, axis=0)
+
+    # Step 3: Compute exp and normalize
+    exp_x = tl.exp(x)
+    denom = tl.sum(exp_x, axis=0)
+    y = exp_x / denom
+
+    # Step 4: Store output
+    tl.store(y_ptr + row * stride_y + offs, y, mask=mask)
 
 
 @triton.jit
