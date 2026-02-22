@@ -70,6 +70,24 @@ def rmsnorm_kernel(
     # Step 4: Apply weight and store
 
     # YOUR CODE HERE
+
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_size
+
+    # Step 1:
+    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+
+    # Step 2:
+    variance = tl.sum(x * x, axis=0) / hidden_size
+
+    # Step 3:
+    x_norm = x * tl.rsqrt(variance + eps)
+
+    # Step 4:
+    y = x_norm * w
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
+
     pass
 
 
@@ -105,6 +123,29 @@ def layernorm_kernel(
     # Step 5: Normalize and apply affine transform
 
     # YOUR CODE HERE
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_size
+
+    # Step 1:
+    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+    b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+
+    # Step 2:
+    mean = tl.sum(x, axis=0) / hidden_size
+
+    # Step 3:
+    x_centered = x - mean
+
+
+    # Step 4:
+    variance = tl.sum(x_centered * x_centered, axis=0) / hidden_size
+
+    # Step 5:
+    x_norm = x_centered * tl.rsqrt(variance + eps)
+    y = x_norm * w + b    
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
+
     pass
 
 
@@ -212,6 +253,37 @@ def linear_kernel_tf32(
     # Step 3: Store the result
 
     # YOUR CODE HERE
+
+    # Step 1:
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    # Step 2:
+    for k_start in range(0, K, BLOCK_K):
+        a = tl.load(
+            a_ptr + offs_m[:, None] * stride_am + (k_start + offs_k[None, :]) * stride_ak,
+            mask=(offs_m[:, None] < M) & (k_start + offs_k[None, :] < K),
+            other=0.0,
+        )
+
+        b = tl.load(
+            b_ptr + (k_start + offs_k[:, None]) * stride_bk + offs_n[None, :] * stride_bn,
+            mask=(k_start + offs_k[:, None] < K) & (offs_n[None, :] < N),
+            other=0.0,
+        )
+
+        acc += tl.dot(a, b)
+
+    # Step 3:
+    tl.store(
+        c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+        acc,
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
     pass
 
 
@@ -1113,8 +1185,7 @@ class EncoderMLP:
 
         intermediate = intermediate.reshape(*orig_shape[:-1], self.intermediate_size)
         return self.fc2(intermediate)
-
-
+        
 if __name__ == "__main__":
     print("Testing Triton Layers...")
 
