@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import math
 from typing import Optional, Tuple
 
 
@@ -232,86 +233,120 @@ def causal_mask_kernel(
         mask=mask,
     )
 
+@triton.autotune(
+    configs=[
+        triton.Config({"TILE_M": 64,  "TILE_N": 64},  num_warps=4, num_stages=3),
+        triton.Config({"TILE_M": 64,  "TILE_N": 32},  num_warps=4, num_stages=3),
+        triton.Config({"TILE_M": 128, "TILE_N": 64},  num_warps=8, num_stages=3),
+        triton.Config({"TILE_M": 128, "TILE_N": 32},  num_warps=8, num_stages=2),
+        triton.Config({"TILE_M": 32,  "TILE_N": 64},  num_warps=4, num_stages=4),
+        triton.Config({"TILE_M": 64,  "TILE_N": 128}, num_warps=8, num_stages=2),
+    ],
+    key=["SEQ_Q", "SEQ_K", "BLOCK_D"],  # re-tune when these change
+)
 @triton.jit
 def fused_attention_kernel(
     q_ptr, k_ptr, v_ptr, output_ptr,
     scale,
-    seq_q, seq_k, head_dim,
+    SEQ_Q,  seq_k, head_dim,      # SEQ_Q is now runtime (not constexpr) — grid uses it
     stride_q0, stride_q1, stride_q2,
     stride_k0, stride_k1, stride_k2,
     stride_v0, stride_v1, stride_v2,
     stride_o0, stride_o1, stride_o2,
     IS_CAUSAL: tl.constexpr,
-    SEQ_Q:  tl.constexpr,   # compile-time = 16
-    BLOCK_K: tl.constexpr,  # compile-time = 16
-    BLOCK_D: tl.constexpr,  # compile-time = 64
+    SEQ_K:     tl.constexpr,      # padded power-of-two key length
+    BLOCK_D:   tl.constexpr,      # padded power-of-two head dim
+    TILE_M:    tl.constexpr,      # query tile rows  — autotuned
+    TILE_N:    tl.constexpr,      # key/val tile rows — autotuned
 ):
     """
-    Grid: (batch * num_heads,)  ← one block handles ALL query positions.
-    K and V are loaded ONCE and reused for every Q row.
-    Both matmuls hit tensor cores via tl.dot.
+    Grid: (ceil(SEQ_Q / TILE_M), batch * num_heads)
+
+    Key change from previous version:
+      axis-0 now parallelises over query blocks, not just batch*heads.
+      Every SM gets a TILE_M x BLOCK_D slice of Q → full GPU utilisation.
     """
-    pid_bh = tl.program_id(0)
+    pid_m  = tl.program_id(0)   # which query tile
+    pid_bh = tl.program_id(1)   # which (batch, head)
 
-    offs_q = tl.arange(0, SEQ_Q)
-    offs_k = tl.arange(0, BLOCK_K)
+    # ── Offsets for this query tile ───────────────────────────────────────────
+    offs_m = pid_m * TILE_M + tl.arange(0, TILE_M)
     offs_d = tl.arange(0, BLOCK_D)
-
-    mask_q = offs_q < seq_q
-    mask_k = offs_k < seq_k
+    mask_m = offs_m < SEQ_Q
     mask_d = offs_d < head_dim
 
-    # ── Load entire Q, K, V for this head ──────────────────────────────────
-    # Each is loaded ONCE, not once-per-query-position as before.
-    # shapes: Q=(SEQ_Q, BLOCK_D), K=(BLOCK_K, BLOCK_D), V=(BLOCK_K, BLOCK_D)
-
+    # ── Load Q tile — TILE_M rows, lives in registers for the K/V loop ────────
     q = tl.load(
         q_ptr + pid_bh * stride_q0
-              + offs_q[:, None] * stride_q1
+              + offs_m[:, None] * stride_q1
               + offs_d[None, :] * stride_q2,
-        mask=mask_q[:, None] & mask_d[None, :], other=0.0,
-    )
+        mask=mask_m[:, None] & mask_d[None, :],
+        other=0.0,
+    ).to(tl.float16)  # (TILE_M, BLOCK_D) fp16 for tensor cores
 
-    k = tl.load(
-        k_ptr + pid_bh * stride_k0
-              + offs_k[:, None] * stride_k1
-              + offs_d[None, :] * stride_k2,
-        mask=mask_k[:, None] & mask_d[None, :], other=0.0,
-    )
+    # ── Online softmax state (TILE_M rows) ────────────────────────────────────
+    m   = tl.full((TILE_M,),          float("-inf"), dtype=tl.float32)
+    l   = tl.zeros((TILE_M,),                        dtype=tl.float32)
+    acc = tl.zeros((TILE_M, BLOCK_D),                dtype=tl.float32)
 
-    v = tl.load(
-        v_ptr + pid_bh * stride_v0
-              + offs_k[:, None] * stride_v1
-              + offs_d[None, :] * stride_v2,
-        mask=mask_k[:, None] & mask_d[None, :], other=0.0,
-    )
-
-    # ── scores = Q @ Kᵀ  →  (SEQ_Q, BLOCK_K) ──────────────────────────────
-    # tl.dot uses tensor cores; old kernel did 16 separate dot-products.
-    scores = tl.dot(q, tl.trans(k)) * scale  # (SEQ_Q, BLOCK_K)
-
-    # ── Causal mask (free: computed in-register) ────────────────────────────
+    # ── Causal: keys beyond the last query row in this tile are all -inf ──────
+    # Cap the loop at (pid_m + 1) * TILE_M so those tiles are never loaded.
+    k_loop_end = SEQ_K
     if IS_CAUSAL:
-        scores = tl.where(offs_q[:, None] >= offs_k[None, :], scores, -1e9)
+        k_loop_end = min(SEQ_K, (pid_m + 1) * TILE_M)
 
-    # ── Padding mask ────────────────────────────────────────────────────────
-    scores = tl.where(mask_k[None, :], scores, -1e9)
+    # ── Stream K/V in TILE_N chunks ───────────────────────────────────────────
+    for n_start in range(0, k_loop_end, TILE_N):
+        offs_n = n_start + tl.arange(0, TILE_N)
+        mask_n = offs_n < seq_k
 
-    # ── Softmax row-wise ────────────────────────────────────────────────────
-    scores_max = tl.max(scores, axis=1)[:, None]
-    exp_s  = tl.exp(scores - scores_max)
-    attn_w = exp_s / tl.sum(exp_s, axis=1)[:, None]   # (SEQ_Q, BLOCK_K)
+        k = tl.load(
+            k_ptr + pid_bh * stride_k0
+                  + offs_n[:, None] * stride_k1
+                  + offs_d[None, :] * stride_k2,
+            mask=mask_n[:, None] & mask_d[None, :],
+            other=0.0,
+        ).to(tl.float16)  # (TILE_N, BLOCK_D)
 
-    # ── out = attn_w @ V  →  (SEQ_Q, BLOCK_D) ──────────────────────────────
-    out = tl.dot(attn_w, v)  # tensor core matmul
+        v = tl.load(
+            v_ptr + pid_bh * stride_v0
+                  + offs_n[:, None] * stride_v1
+                  + offs_d[None, :] * stride_v2,
+            mask=mask_n[:, None] & mask_d[None, :],
+            other=0.0,
+        ).to(tl.float16)  # (TILE_N, BLOCK_D)
 
-    # ── Store all outputs ───────────────────────────────────────────────────
+        # Scores in fp32
+        scores = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * scale  # (TILE_M, TILE_N)
+
+        # Causal mask: only needed on the diagonal tile where n_start overlaps offs_m
+        if IS_CAUSAL:
+            scores = tl.where(
+                offs_m[:, None] >= offs_n[None, :],
+                scores, float("-inf"),
+            )
+
+        # Padding mask
+        scores = tl.where(mask_n[None, :], scores, float("-inf"))
+
+        # Online softmax update
+        m_new  = tl.maximum(m, tl.max(scores, axis=1))
+        alpha  = tl.exp(m - m_new)
+        p      = tl.exp(scores - m_new[:, None]).to(tl.float16)
+
+        l   = alpha * l   + tl.sum(p.to(tl.float32), axis=1)
+        acc = alpha[:, None] * acc + tl.dot(p, v, out_dtype=tl.float32)
+        m   = m_new
+
+    # ── Normalize and store ───────────────────────────────────────────────────
+    acc = acc / l[:, None]
+
     tl.store(
         output_ptr + pid_bh * stride_o0
-                   + offs_q[:, None] * stride_o1
+                   + offs_m[:, None] * stride_o1
                    + offs_d[None, :] * stride_o2,
-        out,
-        mask=mask_q[:, None] & mask_d[None, :],
+        acc,
+        mask=mask_m[:, None] & mask_d[None, :],
     )
 
 # ============================================================================
@@ -382,7 +417,7 @@ def next_power_of_two(x: int) -> int:
     return 1 << (x - 1).bit_length() if x > 0 else 1
 
 
-MAX_ATTENTION_DIM = 256
+MAX_ATTENTION_DIM = 4096
 
 
 def scaled_dot_product_attention(
@@ -393,34 +428,27 @@ def scaled_dot_product_attention(
     is_causal: bool = False,
     scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """
-    Scaled dot-product attention using Triton kernels.
-    """
     batch, num_heads, seq_q, head_dim = q.shape
     _, _, seq_k, _ = k.shape
 
     if scale is None:
-        scale = 1.0 / np.sqrt(head_dim)
+        scale = 1.0 / math.sqrt(head_dim)
 
-    seq_k_padded = next_power_of_two(seq_k)
+    seq_q_padded    = next_power_of_two(seq_q)
+    seq_k_padded    = next_power_of_two(seq_k)
     head_dim_padded = next_power_of_two(head_dim)
 
     use_triton = (
         q.is_cuda
-        and seq_k_padded <= MAX_ATTENTION_DIM
+        and seq_k_padded    <= MAX_ATTENTION_DIM
         and head_dim_padded <= MAX_ATTENTION_DIM
     )
 
     if use_triton:
-        seq_q_padded = next_power_of_two(seq_q)   # <-- add this
-        seq_k_padded = next_power_of_two(seq_k)
-        head_dim_padded = next_power_of_two(head_dim)
-
         q_flat = q.reshape(batch * num_heads, seq_q, head_dim).contiguous().to(torch.float32)
         k_flat = k.reshape(batch * num_heads, seq_k, head_dim).contiguous().to(torch.float32)
         v_flat = v.reshape(batch * num_heads, seq_k, head_dim).contiguous().to(torch.float32)
 
-        # Pad Q if needed (same pattern as K/V)
         if seq_q_padded != seq_q or head_dim_padded != head_dim:
             q_padded = torch.zeros(
                 (batch * num_heads, seq_q_padded, head_dim_padded),
@@ -444,39 +472,43 @@ def scaled_dot_product_attention(
             dtype=torch.float32, device=q.device,
         )
 
-        fused_attention_kernel[(batch * num_heads,)](
+        # Grid now 2D: query tiles × batch*heads
+        grid = lambda meta: (
+            triton.cdiv(seq_q, meta["TILE_M"]),
+            batch * num_heads,
+        )
+
+        fused_attention_kernel[grid](
             q_flat, k_flat, v_flat, output,
             float(scale),
             seq_q, seq_k, head_dim,
             *q_flat.stride(), *k_flat.stride(), *v_flat.stride(), *output.stride(),
             IS_CAUSAL=is_causal,
-            SEQ_Q=seq_q_padded,    # <-- padded power-of-two
-            BLOCK_K=seq_k_padded,
+            SEQ_K=seq_k_padded,
             BLOCK_D=head_dim_padded,
-            num_warps=4,
-            num_stages=1,
+            # TILE_M and TILE_N are chosen by autotune — do not pass manually
         )
 
-        # Slice back to real dims
         output = output[:, :seq_q, :head_dim]
         return output.reshape(batch, num_heads, seq_q, head_dim).to(q.dtype)
 
+    # ── PyTorch fallback ──────────────────────────────────────────────────────
     scores = torch.einsum("bnqd,bnkd->bnqk", q, k) * scale
 
     if is_causal:
-        mask = torch.triu(
+        causal_mask = torch.triu(
             torch.ones((seq_q, seq_k), dtype=torch.float32, device=q.device),
             diagonal=1,
         ) * -1e9
-        scores = scores + mask[None, None, :, :]
+        scores = scores + causal_mask[None, None, :, :]
 
     if attention_mask is not None:
         scores = scores + attention_mask
 
-    scores = scores - torch.max(scores, dim=-1, keepdim=True).values
+    scores       = scores - torch.max(scores, dim=-1, keepdim=True).values
     attn_weights = torch.exp(scores)
     attn_weights = attn_weights / torch.sum(attn_weights, dim=-1, keepdim=True)
-    output = torch.einsum("bnqk,bnkd->bnqd", attn_weights, v)
+    output       = torch.einsum("bnqk,bnkd->bnqd", attn_weights, v)
 
     return output.to(q.dtype)
 
