@@ -88,9 +88,6 @@ def rmsnorm_kernel(
     y = x_norm * w
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
-    pass
-
-
 @triton.jit
 def layernorm_kernel(
     x_ptr,
@@ -137,7 +134,6 @@ def layernorm_kernel(
     # Step 3:
     x_centered = x - mean
 
-
     # Step 4:
     variance = tl.sum(x_centered * x_centered, axis=0) / hidden_size
 
@@ -145,9 +141,6 @@ def layernorm_kernel(
     x_norm = x_centered * tl.rsqrt(variance + eps)
     y = x_norm * w + b    
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
-
-    pass
-
 
 @triton.jit
 def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
@@ -214,7 +207,7 @@ def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 3: Multiply and store
     tl.store(y_ptr + offs, y, mask=mask)
 
-
+'''
 @triton.jit
 def linear_kernel_tf32(
     a_ptr,
@@ -283,9 +276,47 @@ def linear_kernel_tf32(
         acc,
         mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
     )
+'''
+###
+@triton.jit
+def linear_kernel_tf32(
+    a_ptr, b_ptr, c_ptr,
+    M, N, K,
+    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr = 8
+):
+    # --- SWIZZLING LOGIC ---
+    # We use a 1D grid and calculate 2D coordinates manually for L2 cache efficiency
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_SIZE_M * num_pid_n
+    group_id = pid // width
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % width) // group_size_m
 
-    pass
+    # --- TILE OFFSETS ---
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_n = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_k = tl.arange(0, BLOCK_K)
 
+    # --- ACCUMULATION ---
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        k_offs = k * BLOCK_K + offs_k
+        a = tl.load(a_ptr + offs_m[:, None] * stride_am + k_offs[None, :] * stride_ak, 
+                    mask=(offs_m[:, None] < M) & (k_offs[None, :] < K), other=0.0)
+        b = tl.load(b_ptr + k_offs[:, None] * stride_bk + offs_n[None, :] * stride_bn, 
+                    mask=(k_offs[:, None] < K) & (offs_n[None, :] < N), other=0.0)
+        acc += tl.dot(a, b)
+
+    # --- STORE ---
+    tl.store(c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn, acc, 
+             mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+###
 
 @triton.jit
 def linear_gelu_kernel(
@@ -748,9 +779,9 @@ def get_activation(name: str):
 class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
-    TILE_M = 64
-    TILE_N = 64
-    TILE_K = 32
+    TILE_M = 64 
+    TILE_N = 64 
+    TILE_K = 32 
 
     BACKEND = "torch"
 
@@ -847,10 +878,16 @@ class Linear:
             (M_padded, self._N_padded), dtype=torch.float32, device=x.device
         )
 
+        '''
         grid = (
             triton.cdiv(M_padded, self.TILE_M),
             triton.cdiv(self._N_padded, self.TILE_N),
         )
+        '''
+    ###
+        grid = (triton.cdiv(M_padded, self.TILE_M) * triton.cdiv(self._N_padded, self.TILE_N),)    
+    ###
+
         linear_kernel_tf32[grid](
             x_padded,
             self._weight_t_padded,
