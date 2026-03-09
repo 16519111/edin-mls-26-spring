@@ -151,26 +151,9 @@ def layernorm_kernel(
 
     pass
 
-
-# ============================================================================
-# OPTIMIZATION 1: Autotuned block sizes for GELU
-#
-# We tried 4 configurations across BLOCK_SIZE × num_warps × num_stages.
-# Triton's autotuner benchmarks them all and picks the best for your GPU.
-#
-# Config sweep (measured on A100-SXM4-80GB):
-#   BLOCK_SIZE=256,  num_warps=2, num_stages=2  →  ~1 380 GB/s
-#   BLOCK_SIZE=512,  num_warps=4, num_stages=2  →  ~1 470 GB/s
-#   BLOCK_SIZE=1024, num_warps=4, num_stages=3  →  ~1 550 GB/s  ← winner
-#   BLOCK_SIZE=2048, num_warps=8, num_stages=4  →  ~1 510 GB/s
-#
-# Key insight: num_stages=3 pipelines DRAM loads with compute; going to 4
-# adds register pressure that hurts for this purely memory-bound kernel.
-# ============================================================================
-
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),  # ← best
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=4),
         triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
         triton.Config({"BLOCK_SIZE": 256},  num_warps=2, num_stages=2),
@@ -210,7 +193,15 @@ def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 3: Store output
     tl.store(y_ptr + offs, y, mask=mask)
 
-
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_SIZE": 256},  num_warps=2, num_stages=2),
+    ],
+    key=["n_elements"],
+)
 @triton.jit
 def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     """
@@ -431,8 +422,7 @@ def swiglu_fused_kernel(
         gate_acc += tl.dot(a, gate_w)
         up_acc += tl.dot(a, up_w)
 
-    # OPTIMIZATION: fast_expf is a single PTX instruction vs tl.exp
-    sigmoid = 1.0 / (1.0 + tl.math.fast_expf(-gate_acc))
+    sigmoid = 1.0 / (1.0 + tl.exp(-gate_acc))
     gate_act = gate_acc * sigmoid
     out = gate_act * up_acc
 
@@ -755,7 +745,7 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
     grid = (triton.cdiv(total, block),)
 
     if x.is_cuda:
-        gelu_kernel[grid](x_flat, output, total, BLOCK_SIZE=block)
+        gelu_kernel[grid](x_flat, output, total)
         return output[:total].reshape(original_shape).to(x.dtype)
 
     return torch.nn.functional.gelu(x)
@@ -772,7 +762,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     grid = (triton.cdiv(total, block),)
 
     if x.is_cuda:
-        silu_kernel[grid](x_flat, output, total, BLOCK_SIZE=block)
+        silu_kernel[grid](x_flat, output, total)
         return output[:total].reshape(original_shape).to(x.dtype)
 
     return torch.nn.functional.silu(x)
@@ -1111,7 +1101,6 @@ class MLP:
             up_w_padded.stride(1),
             intermediate.stride(0),
             intermediate.stride(1),
-            # NO BLOCK_M/N/K here — autotune owns them
         )
 
         if M != M_pad or N != N_pad:
@@ -1239,45 +1228,39 @@ if __name__ == "__main__":
     y = norm(x)
     print(f"Input: {x.shape} -> Output: {y.shape}")
 
-    # print("\n=== LayerNorm ===")
-    # ln = LayerNorm(256)
-    # y = ln(x)
-    # print(f"Input: {x.shape} -> Output: {y.shape}")
+    print("\n=== LayerNorm ===")
+    ln = LayerNorm(256)
+    y = ln(x)
+    print(f"Input: {x.shape} -> Output: {y.shape}")
 
-
-    start = time.perf_counter()
     print("\n=== GELU ===")
     y = gelu(x)
     print(f"Input: {x.shape} -> Output: {y.shape}")
-    end = time.perf_counter()
 
-    elapsed = end - start
-    print(f"Elapsed time: {elapsed:.6f} seconds")
+    print("\n=== SiLU ===")
+    y = silu(x)
+    print(f"Input: {x.shape} -> Output: {y.shape}")
 
-    # print("\n=== SiLU ===")
-    # y = silu(x)
-    # print(f"Input: {x.shape} -> Output: {y.shape}")
+    print("\n=== Linear ===")
+    linear = Linear(256, 512)
+    y = linear(x)
+    print(f"Input: {x.shape} -> Output: {y.shape}")
 
-    # print("\n=== Linear ===")
-    # linear = Linear(256, 512)
-    # y = linear(x)
-    # print(f"Input: {x.shape} -> Output: {y.shape}")
+    print("\n=== Embedding ===")
+    emb = Embedding(1000, 256)
+    ids = torch.randint(0, 1000, (2, 16), device=device, dtype=torch.int32)
+    y = emb(ids)
+    print(f"Input: {ids.shape} -> Output: {y.shape}")
 
-    # print("\n=== Embedding ===")
-    # emb = Embedding(1000, 256)
-    # ids = torch.randint(0, 1000, (2, 16), device=device, dtype=torch.int32)
-    # y = emb(ids)
-    # print(f"Input: {ids.shape} -> Output: {y.shape}")
+    print("\n=== Softmax ===")
+    x_sm = torch.randn(2, 4, 16, 16, device=device, dtype=torch.float32)
+    y = softmax(x_sm, axis=-1)
+    print(f"Input: {x_sm.shape} -> Output: {y.shape}")
+    print(f"Sum along last axis: {float(y[0, 0, 0].sum()):.6f} (should be 1.0)")
 
-    # print("\n=== Softmax ===")
-    # x_sm = torch.randn(2, 4, 16, 16, device=device, dtype=torch.float32)
-    # y = softmax(x_sm, axis=-1)
-    # print(f"Input: {x_sm.shape} -> Output: {y.shape}")
-    # print(f"Sum along last axis: {float(y[0, 0, 0].sum()):.6f} (should be 1.0)")
+    print("\n=== MLP ===")
+    mlp = MLP(256, 512, activation="silu", use_gating=True)
+    y = mlp(x)
+    print(f"Input: {x.shape} -> Output: {y.shape}")
 
-    # print("\n=== MLP ===")
-    # mlp = MLP(256, 512, activation="silu", use_gating=True)
-    # y = mlp(x)
-    # print(f"Input: {x.shape} -> Output: {y.shape}")
-
-    # print("\nAll Triton layers working!")
+    print("\nAll Triton layers working!")
