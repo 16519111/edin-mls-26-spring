@@ -293,7 +293,7 @@ def fused_attention_kernel(
     # Cap the loop at (pid_m + 1) * TILE_M so those tiles are never loaded.
     k_loop_end = SEQ_K
     if IS_CAUSAL:
-        k_loop_end = min(SEQ_K, (pid_m + 1) * TILE_M)
+        k_loop_end = tl.minimum(SEQ_K, (pid_m + 1) * TILE_M)
 
     # ── Stream K/V in TILE_N chunks ───────────────────────────────────────────
     for n_start in range(0, k_loop_end, TILE_N):
@@ -442,6 +442,7 @@ def scaled_dot_product_attention(
         q.is_cuda
         and seq_k_padded    <= MAX_ATTENTION_DIM
         and head_dim_padded <= MAX_ATTENTION_DIM
+        # and attention_mask is None
     )
 
     if use_triton:
@@ -450,10 +451,7 @@ def scaled_dot_product_attention(
         v_flat = v.reshape(batch * num_heads, seq_k, head_dim).contiguous().to(torch.float32)
 
         if seq_q_padded != seq_q or head_dim_padded != head_dim:
-            q_padded = torch.zeros(
-                (batch * num_heads, seq_q_padded, head_dim_padded),
-                dtype=torch.float32, device=q.device,
-            )
+            q_padded = torch.zeros((batch * num_heads, seq_q_padded, head_dim_padded), dtype=torch.float32, device=q.device)
             q_padded[:, :seq_q, :head_dim] = q_flat
             q_flat = q_padded
 
@@ -491,7 +489,14 @@ def scaled_dot_product_attention(
 
         output = output[:, :seq_q, :head_dim]
         return output.reshape(batch, num_heads, seq_q, head_dim).to(q.dtype)
+        if attention_mask is not None:
+            # Only hits for text decoder prefill — small seq_len, fast
+            scores_post = (q.float() @ k.float().transpose(-2, -1)) * scale
+            scores_post = scores_post + attention_mask
+            attn_weights = torch.softmax(scores_post, dim=-1)
+            result = (attn_weights @ v.float()).to(q.dtype)
 
+        return result
     # ── PyTorch fallback ──────────────────────────────────────────────────────
     scores = torch.einsum("bnqd,bnkd->bnqk", q, k) * scale
 
