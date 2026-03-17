@@ -42,9 +42,11 @@ def compute_freqs_kernel(
     offs = tl.arange(0, BLOCK)
     mask = offs < half_dim
 
+    # Load scalar position and inverse frequencies
     pos = tl.load(positions_ptr + pid * stride_pos)
     inv = tl.load(inv_freq_ptr + offs * stride_inv, mask=mask, other=0.0)
     freqs = pos * inv
+
 
     cos_half = tl.cos(freqs)
     sin_half = tl.sin(freqs)
