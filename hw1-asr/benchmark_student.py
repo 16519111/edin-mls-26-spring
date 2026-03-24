@@ -18,7 +18,18 @@ import numpy as np
 import importlib
 
 # Expected transcription for the test audio
-EXPECTED_TEXT = "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
+def get_expected_text(file_name):
+    if file_name == "clean_short.wav":
+        return "MISTER POPHAM LAID DOWN HIS BRUSH"
+    elif file_name == "clean_long.wav":
+        return "HE MUST DESCEND WITH HIS HEART FULL OF CHARITY AND SEVERITY AT THE SAME TIME AS A BROTHER AND AS A JUDGE TO THOSE IMPENETRABLE CASEMATES WHERE CRAWL PELL MELL THOSE WHO BLEED AND THOSE WHO DEAL THE BLOW THOSE WHO WEEP AND THOSE WHO CURSE THOSE WHO FAST AND THOSE WHO DEVOUR THOSE WHO ENDURE EVIL AND THOSE WHO INFLICT IT"
+    elif file_name == "hard_short.wav":
+        return "BUT BESIDES I CAN GIVE YOU OTHERS"
+    elif file_name == "hard_long.wav":
+        return "MISTER FISH IS THE SQUIRE OF DAMES AND HAS SO MANY MISTRESSES THAT ANYBODY MAY PRETEND A SHARE IN HIM AND BE BELIEVED BUT THOUGH I HAVE THE HONOUR TO BE HIS NEAR NEIGHBOUR TO SPEAK FREELY I CANNOT BRAG MUCH THAT HE MAKES ANY COURT TO ME AND I KNOW NO YOUNG WOMAN IN THE COUNTRY THAT HE DOES NOT VISIT OFTEN"
+    else:
+        return "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
+
 
 def download_librispeech_sample():
     """Download a LibriSpeech sample audio file."""
@@ -89,6 +100,7 @@ def load_test_audio(audio_path=None):
             os.path.expanduser("~/.cache/glm_asr/test_audio.flac"),
             "../test_audio.wav",
         ]
+        audio_path = ""
 
     audio_array = None
     sr = 16000
@@ -125,7 +137,7 @@ def load_test_audio(audio_path=None):
             audio_array = np.interp(new_indices, old_indices, audio_array)
 
     duration = len(audio_array) / target_sr
-    return audio_array.astype(np.float32), EXPECTED_TEXT, duration
+    return audio_array.astype(np.float32), get_expected_text(audio_path), duration
 
 
 def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):

@@ -24,3 +24,7 @@ Thumbs.db
 
 # Lock files (platform-specific, use requirements-*.lock as reference)
 requirements.lock
+
+hw1-asr/LibriSpeech/
+
+hw1-asr/*.gz
