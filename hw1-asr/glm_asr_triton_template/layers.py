@@ -145,8 +145,8 @@ def layernorm_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
         triton.Config({"BLOCK_SIZE": 256},  num_warps=2, num_stages=2),
     ],
@@ -188,8 +188,8 @@ def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
         triton.Config({"BLOCK_SIZE": 256},  num_warps=2, num_stages=2),
     ],
@@ -488,6 +488,15 @@ def embedding_kernel(
     tl.store(output_ptr + pid0 * stride_out0 + offs, w, mask=mask)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_SIZE": 256},  num_warps=2, num_stages=2),
+    ],
+    key=["n_elements"],
+)
 @triton.jit
 def softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE: tl.constexpr):
     """
@@ -1010,7 +1019,6 @@ def softmax(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
             x_flat.stride(0),
             output.stride(0),
             seq_len,
-            BLOCK_SIZE=block,
         )
         result = output.reshape(original_shape)
     else:
