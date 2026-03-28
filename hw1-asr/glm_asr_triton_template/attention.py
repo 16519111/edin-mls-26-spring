@@ -248,16 +248,16 @@ def causal_mask_kernel(
 def fused_attention_kernel(
     q_ptr, k_ptr, v_ptr, output_ptr,
     scale,
-    SEQ_Q,  seq_k, head_dim,      # SEQ_Q is now runtime (not constexpr) — grid uses it
+    SEQ_Q,  seq_k, head_dim,
     stride_q0, stride_q1, stride_q2,
     stride_k0, stride_k1, stride_k2,
     stride_v0, stride_v1, stride_v2,
     stride_o0, stride_o1, stride_o2,
     IS_CAUSAL: tl.constexpr,
-    SEQ_K:     tl.constexpr,      # padded power-of-two key length
-    BLOCK_D:   tl.constexpr,      # padded power-of-two head dim
-    TILE_M:    tl.constexpr,      # query tile rows  — autotuned
-    TILE_N:    tl.constexpr,      # key/val tile rows — autotuned
+    SEQ_K:     tl.constexpr,
+    BLOCK_D:   tl.constexpr,
+    TILE_M:    tl.constexpr,
+    TILE_N:    tl.constexpr,
 ):
     """
     Grid: (ceil(SEQ_Q / TILE_M), batch * num_heads)
@@ -266,36 +266,36 @@ def fused_attention_kernel(
       axis-0 now parallelises over query blocks, not just batch*heads.
       Every SM gets a TILE_M x BLOCK_D slice of Q → full GPU utilisation.
     """
-    pid_m  = tl.program_id(0)   # which query tile
-    pid_bh = tl.program_id(1)   # which (batch, head)
+    pid_m  = tl.program_id(0)
+    pid_bh = tl.program_id(1)
 
-    # ── Offsets for this query tile ───────────────────────────────────────────
+    # ── Offsets for this query tile
     offs_m = pid_m * TILE_M + tl.arange(0, TILE_M)
     offs_d = tl.arange(0, BLOCK_D)
     mask_m = offs_m < SEQ_Q
     mask_d = offs_d < head_dim
 
-    # ── Load Q tile — TILE_M rows, lives in registers for the K/V loop ────────
+    # Load Q tile — TILE_M rows, lives in registers for the K/V loop
     q = tl.load(
         q_ptr + pid_bh * stride_q0
               + offs_m[:, None] * stride_q1
               + offs_d[None, :] * stride_q2,
         mask=mask_m[:, None] & mask_d[None, :],
         other=0.0,
-    ).to(tl.float16)  # (TILE_M, BLOCK_D) fp16 for tensor cores
+    ).to(tl.float16)
 
-    # ── Online softmax state (TILE_M rows) ────────────────────────────────────
-    m   = tl.full((TILE_M,),          float("-inf"), dtype=tl.float32)
-    l   = tl.zeros((TILE_M,),                        dtype=tl.float32)
-    acc = tl.zeros((TILE_M, BLOCK_D),                dtype=tl.float32)
+    # Online softmax state (TILE_M rows)
+    m   = tl.full((TILE_M,), float("-inf"), dtype=tl.float32)
+    l   = tl.zeros((TILE_M,), dtype=tl.float32)
+    acc = tl.zeros((TILE_M, BLOCK_D), dtype=tl.float32)
 
-    # ── Causal: keys beyond the last query row in this tile are all -inf ──────
+    # Causal: keys beyond the last query row in this tile are all -inf
     # Cap the loop at (pid_m + 1) * TILE_M so those tiles are never loaded.
     k_loop_end = SEQ_K
     if IS_CAUSAL:
         k_loop_end = tl.minimum(SEQ_K, (pid_m + 1) * TILE_M)
 
-    # ── Stream K/V in TILE_N chunks ───────────────────────────────────────────
+    # Stream K/V in TILE_N chunks
     for n_start in range(0, k_loop_end, TILE_N):
         offs_n = n_start + tl.arange(0, TILE_N)
         mask_n = offs_n < seq_k
@@ -306,7 +306,7 @@ def fused_attention_kernel(
                   + offs_d[None, :] * stride_k2,
             mask=mask_n[:, None] & mask_d[None, :],
             other=0.0,
-        ).to(tl.float16)  # (TILE_N, BLOCK_D)
+        ).to(tl.float16)
 
         v = tl.load(
             v_ptr + pid_bh * stride_v0
@@ -314,10 +314,10 @@ def fused_attention_kernel(
                   + offs_d[None, :] * stride_v2,
             mask=mask_n[:, None] & mask_d[None, :],
             other=0.0,
-        ).to(tl.float16)  # (TILE_N, BLOCK_D)
+        ).to(tl.float16)
 
         # Scores in fp32
-        scores = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * scale  # (TILE_M, TILE_N)
+        scores = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * scale
 
         # Causal mask: only needed on the diagonal tile where n_start overlaps offs_m
         if IS_CAUSAL:
@@ -338,7 +338,7 @@ def fused_attention_kernel(
         acc = alpha[:, None] * acc + tl.dot(p, v, out_dtype=tl.float32)
         m   = m_new
 
-    # ── Normalize and store ───────────────────────────────────────────────────
+    # Normalize and store
     acc = acc / l[:, None]
 
     tl.store(

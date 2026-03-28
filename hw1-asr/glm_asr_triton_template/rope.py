@@ -148,8 +148,6 @@ def apply_rope_kernel(
     x2 = tl.load(x_base + (offs + half_dim) * stride_xd, mask=rot_mask, other=0.0)
 
     # Load cos/sin for this sequence position (shape: [half_dim])
-    # cos_ptr already has the duplicated layout from compute_freqs_kernel,
-    # but here we only need the first half (we apply rotation directly).
     cos_v = tl.load(cos_ptr + s * stride_cs + offs * stride_cd, mask=rot_mask, other=1.0)
     sin_v = tl.load(sin_ptr + s * stride_cs + offs * stride_cd, mask=rot_mask, other=0.0)
 

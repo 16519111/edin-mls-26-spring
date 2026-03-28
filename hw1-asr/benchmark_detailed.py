@@ -178,6 +178,17 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
     print("DETAILED OPERATOR PROFILING")
     print("="*70)
 
+    # Warmup: trigger Triton JIT compilation
+    print("\n[Warmup] Compiling Triton kernels...")
+    _ = model.audio_encoder(input_features)
+    _proj = model.multi_modal_projector(_)
+    del _, _proj
+    import gc
+    import torch
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  Warmup complete.")
+
     # 1. Profile Audio Encoder
     print("\n[1/4] Profiling Audio Encoder...")
     encoder_times = []
@@ -231,6 +242,12 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
         num_audio_tokens = len(audio_positions)
         if num_audio_tokens <= projected.shape[1]:
             combined_embeds[0, audio_positions[:projected.shape[1]]] = projected[0, :num_audio_tokens]
+
+    # Warmup decoder
+    _ = model.text_decoder(inputs_embeds=combined_embeds)
+    del _
+    gc.collect()
+    torch.cuda.empty_cache()
 
     prefill_times = []
     for _ in range(num_runs):
@@ -331,6 +348,16 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
     print("\n" + "="*70)
     print("DETAILED OPERATOR PROFILING (TORCH)")
     print("="*70)
+    
+    # Warmup: trigger Triton JIT compilation
+    print("\n[Warmup] Compiling Triton kernels...")
+    _ = model.audio_encoder(input_features)
+    _proj = model.multi_modal_projector(_)
+    del _, _proj
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  Warmup complete.")
 
     print("\n[1/4] Profiling Audio Encoder...")
     encoder_times = []
@@ -380,6 +407,13 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
         if num_audio_tokens <= projected.shape[1]:
             combined_embeds[0, audio_positions[:projected.shape[1]]] = projected[0, :num_audio_tokens]
 
+    # Warmup decoder
+    _ = model.text_decoder(inputs_embeds=combined_embeds)
+    del _
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
     prefill_times = []
     for _ in range(num_runs):
         if torch.cuda.is_available():
@@ -396,31 +430,50 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
     }
     print(f"  Decoder Prefill: {results['decoder_prefill']['mean']:.2f}ms (+/- {results['decoder_prefill']['std']:.2f}ms)")
 
-    print("\n[4/4] Profiling Decode Steps...")
+
+    print("\n[4/4] Profiling Decode Steps (full generation)...")
+    # Run full generation to warm up all autotune caches
+    # (this covers all seq_q lengths that generate() will encounter)
+    # Warmup with same max_new_tokens to cache ALL autotune shapes
+    full_output = model.generate(                                                                                                         
+        input_features,
+        input_ids=input_ids,                                                                                                              
+        input_features_mask=input_features_mask,
+        max_new_tokens=50,  # <-- match the timed run
+        temperature=1.0,                                                                                                                  
+        top_k=1
+    )                                                                                                                                     
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Now time full generation
     decode_times = []
-    num_decode_steps = 10
-
-    logits = model.lm_head(hidden_states[:, -1:, :])
-    next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-
-    for _ in range(num_decode_steps):
+    for _ in range(num_runs):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         timer.start()
-        next_embed = embed_tokens(next_token)
-        step_hidden = model.text_decoder(inputs_embeds=next_embed)
-        step_logits = model.lm_head(step_hidden)
-        next_token = torch.argmax(step_logits[:, -1, :], dim=-1, keepdim=True)
+
+        output = model.generate(
+            input_features,
+            input_ids=input_ids,
+            input_features_mask=input_features_mask,
+            max_new_tokens=50,
+            temperature=1.0,
+            top_k=1
+        )
+
         elapsed = timer.stop()
         decode_times.append(elapsed)
 
+    num_tokens = output.shape[1] - input_ids.shape[1]
     results['decode_step'] = {
         'mean': np.mean(decode_times),
         'std': np.std(decode_times),
         'min': np.min(decode_times),
         'max': np.max(decode_times)
     }
-    print(f"  Decode Step (avg): {results['decode_step']['mean']:.2f}ms (+/- {results['decode_step']['std']:.2f}ms)")
+    print(f"  Full generation ({num_tokens} tokens): {results['decode_step']['mean']:.2f}ms (+/- {results['decode_step']['std']:.2f}ms)")
+    print(f"  Per token: {results['decode_step']['mean'] / max(num_tokens, 1):.2f}ms/token")
 
     print("\n[5] Profiling Individual Decoder Layers...")
     layer_times = []
@@ -780,71 +833,76 @@ def profile_linear_ops_torch(hidden_size=2048, intermediate_size=5632, batch_siz
 
 def print_summary(component_results, attention_results, linear_results):
     """Print a summary table of all profiling results."""
-    print("\n" + "="*70)
+    print("\n" + "="*70)                                                                                                                  
     print("PERFORMANCE SUMMARY")
-    print("="*70)
-
+    print("="*70)                                                                                                                         
+                                                                                                                                        
     print("\n{:<35} {:>12} {:>12}".format("Component", "Time (ms)", "% of Total"))
-    print("-"*60)
-
-    # Calculate total time
-    total = 0
-    if component_results:
-        for key in ['audio_encoder', 'projector', 'decoder_prefill']:
-            if key in component_results:
-                total += component_results[key]['mean']
-        # Add estimated decode time (50 steps)
-        if 'decode_step' in component_results:
-            total += component_results['decode_step']['mean'] * 50
-
-    if component_results:
+    print("-"*60)                                                                                                                         
+                                                                                                                                        
+    # Total is the full generation time
+    if component_results and 'decode_step' in component_results:                                                                          
+        total = component_results['decode_step']['mean']                                                                                  
+    else:
+        total = 0                                                                                                                         
+        if component_results:
+            for key in ['audio_encoder', 'projector', 'decoder_prefill']:                                                                 
+                if key in component_results:
+                    total += component_results[key]['mean']                                                                               
+                
+    if component_results and total > 0:                                                                                                   
         for key, label in [
-            ('audio_encoder', 'Audio Encoder'),
+            ('audio_encoder', 'Audio Encoder'),                                                                                           
             ('projector', 'Multi-modal Projector'),
-            ('decoder_prefill', 'Decoder (Prefill)'),
+            ('decoder_prefill', 'Decoder (Prefill)'),                                                                                     
         ]:
-            if key in component_results:
+            if key in component_results:                                                                                                  
                 t = component_results[key]['mean']
-                pct = (t / total * 100) if total > 0 else 0
-                print(f"{label:<35} {t:>10.2f}ms {pct:>10.1f}%")
+                pct = (t / total * 100)
+                print(f"{label:<35} {t:>10.2f}ms {pct:>10.1f}%")                                                                          
 
-        if 'decode_step' in component_results:
-            t = component_results['decode_step']['mean'] * 50
-            pct = (t / total * 100) if total > 0 else 0
-            print(f"{'Decoder (50 decode steps)':<35} {t:>10.2f}ms {pct:>10.1f}%")
-
+        if 'decode_step' in component_results:                                                                                            
+            # Estimate decode-only time by subtracting other components
+            overhead = 0                                                                                                                  
+            for k in ['audio_encoder', 'projector', 'decoder_prefill']:
+                if k in component_results:
+                    overhead += component_results[k]['mean']
+            decode_only = component_results['decode_step']['mean'] - overhead                                                             
+            pct = (decode_only / total * 100)
+            print(f"{'Decoder (Decode, estimated)':<35} {decode_only:>10.2f}ms {pct:>10.1f}%")                                            
+                                                                                                                                        
     print("-"*60)
-    print(f"{'TOTAL (estimated for 50 tokens)':<35} {total:>10.2f}ms")
-
+    print(f"{'TOTAL (full generation)':<35} {total:>10.2f}ms")                                                                            
+                                                                                                                                        
     # Attention comparison
-    if attention_results:
+    if attention_results:                                                                                                                 
         print("\n" + "-"*60)
-        print("Attention Methods Comparison:")
+        print("Attention Methods Comparison:")                                                                                            
         print("-"*60)
-        if 'standard_attention' in attention_results:
+        if 'standard_attention' in attention_results:                                                                                     
             print(f"  {'Standard (einsum)':<25} {attention_results['standard_attention']:>10.2f}ms")
-        if 'cublas_attention' in attention_results:
-            print(f"  {'cuBLAS matmul':<25} {attention_results['cublas_attention']:>10.2f}ms")
-        if 'matmul_attention' in attention_results:
-            print(f"  {'Torch matmul':<25} {attention_results['matmul_attention']:>10.2f}ms")
-
-    # Linear comparison
+        if 'cublas_attention' in attention_results:                                                                                       
+            print(f"  {'cuBLAS matmul':<25} {attention_results['cublas_attention']:>10.2f}ms")                                            
+        if 'matmul_attention' in attention_results:                                                                                       
+            print(f"  {'Torch matmul':<25} {attention_results['matmul_attention']:>10.2f}ms")                                             
+                
+    # Linear comparison                                                                                                                   
     if linear_results:
-        print("\n" + "-"*60)
+        print("\n" + "-"*60)                                                                                                              
         print("Linear/GEMM Methods Comparison:")
-        print("-"*60)
+        print("-"*60)                                                                                                                     
         if 'cupy_matmul' in linear_results:
-            print(f"  {'CuPy matmul':<25} {linear_results['cupy_matmul']:>10.2f}ms")
-        if 'cupy_einsum' in linear_results:
-            print(f"  {'CuPy einsum':<25} {linear_results['cupy_einsum']:>10.2f}ms")
-        if 'cublas_gemm' in linear_results:
+            print(f"  {'CuPy matmul':<25} {linear_results['cupy_matmul']:>10.2f}ms")                                                      
+        if 'cupy_einsum' in linear_results:                                                                                               
+            print(f"  {'CuPy einsum':<25} {linear_results['cupy_einsum']:>10.2f}ms")                                                      
+        if 'cublas_gemm' in linear_results:                                                                                               
             print(f"  {'cuBLAS GEMM':<25} {linear_results['cublas_gemm']:>10.2f}ms")
-        if 'torch_matmul' in linear_results:
+        if 'torch_matmul' in linear_results:                                                                                              
             print(f"  {'Torch matmul':<25} {linear_results['torch_matmul']:>10.2f}ms")
-        if 'torch_einsum' in linear_results:
+        if 'torch_einsum' in linear_results:                                                                                              
             print(f"  {'Torch einsum':<25} {linear_results['torch_einsum']:>10.2f}ms")
-        if 'torch_gemm' in linear_results:
-            print(f"  {'Torch GEMM':<25} {linear_results['torch_gemm']:>10.2f}ms")
+        if 'torch_gemm' in linear_results:                                                                                                
+            print(f"  {'Torch GEMM':<25} {linear_results['torch_gemm']:>10.2f}ms")                                                        
         if 'full_mlp' in linear_results:
             print(f"  {'Full MLP (SwiGLU)':<25} {linear_results['full_mlp']:>10.2f}ms")
 
@@ -953,6 +1011,22 @@ def main():
     print(f"\nLoading model from {args.folder}...")
     from weight_loader import load_model_from_hf
     model, processor = load_model_from_hf("zai-org/GLM-ASR-Nano-2512")
+
+    # Apply backend settings
+    import importlib
+    layers_mod = importlib.import_module("layers")
+    if 'template' in args.folder:
+        layers_mod.Linear.BACKEND = 'cublas'
+        layers_mod.MLP.FUSED = True
+        if hasattr(layers_mod, 'EncoderMLP'):
+            layers_mod.EncoderMLP.FUSED = True
+    else:
+        layers_mod.Linear.BACKEND = 'cublas'
+        layers_mod.MLP.FUSED = False
+        if hasattr(layers_mod, 'EncoderMLP'):
+            layers_mod.EncoderMLP.FUSED = False
+    print(f"  Linear.BACKEND = {layers_mod.Linear.BACKEND}")
+    print(f"  MLP.FUSED = {layers_mod.MLP.FUSED}")
 
     if use_torch_backend:
         import torch
